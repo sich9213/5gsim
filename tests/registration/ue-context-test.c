@@ -33,11 +33,36 @@ ogs_pkbuf_t *recvbuf_thread[THREADNUM]; // tempuse
 #include <pthread.h>
 #include <semaphore.h>
 sem_t occupied_s1ap_read;
+sem_t occupied_gtpu_read;
 int all_terminated = 0;
 sem_t received_sem_ue[THREADNUM];
 
 // mutex for sending
 pthread_mutex_t s1ap_send_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#define log_update(x,y) { x = clock()-y; y = clock(); }
+#define log_reset_time(x) {x = clock();}
+struct UE_LOG {
+    	clock_t init_ue_msg_time;
+	clock_t auth_request_time;
+    	clock_t auth_response_time ;
+	clock_t security_mode_command_time ;
+	clock_t security_mode_complete_time ;
+	clock_t ESM_info_request_time ;
+	clock_t ESM_info_response_time ;
+	clock_t UE_info_time ;
+	clock_t initial_context_setup_receive_time;
+	clock_t initial_context_setup_send_time ;
+    	clock_t activate_EPS_time ;
+    	clock_t receive_EMM_time ;
+	clock_t EMM_service_request_time;
+    	clock_t ping_time ;
+	clock_t detach_request_time ;
+	clock_t UE_release_command_time ;
+	clock_t UE_release_complete_time ;
+	clock_t last_update ;
+
+}ue_log[THREADNUM];
 
 
 void sock_init(char *ip_amf, char *ip_upf) {
@@ -231,6 +256,9 @@ static void test1_func(abts_case *tc, void *data)
     bson_destroy(doc);
     */
 
+    struct UE_LOG *log = &ue_log[ue_id];
+    log_reset_time(log->last_update);
+
     /* Send Registration request */
     gmmbuf = testgmm_build_registration_request(test_ue, NULL);
     //printf("ran_ue_ngap_id: %d\n",test_ue->ran_ue_ngap_id);
@@ -252,6 +280,7 @@ static void test1_func(abts_case *tc, void *data)
     rv = testgnb_ngap_send(ngap, sendbuf);
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 printf("[SEND INIT UE MSG DONE]: %d\n",ue_id);
+log_update( log->init_ue_msg_time, log->last_update );
     //printf("ran_ue_ngap_id: %d\n",test_ue->ran_ue_ngap_id);
     pthread_mutex_unlock(&s1ap_send_lock);
     
@@ -268,6 +297,7 @@ printf("[SEND INIT UE MSG DONE]: %d\n",ue_id);
     
 
 printf("[RECV AUTH REQUEST DONE]: %d\n", ue_id);
+log_update(log->auth_request_time, log->last_update);
     /* Send Authentication response */
     pthread_mutex_lock(&s1ap_send_lock);
     gmmbuf = testgmm_build_authentication_response(test_ue);
@@ -279,6 +309,7 @@ printf("[RECV AUTH REQUEST DONE]: %d\n", ue_id);
     pthread_mutex_unlock(&s1ap_send_lock);
 
 printf("[SEND AUTH RESPONSE DONE]: %d\n",ue_id);
+log_update( log->auth_response_time, log->last_update);
     /* Receive Security mode command */
 /*
     recvbuf = testgnb_ngap_read(ngap);
@@ -292,6 +323,7 @@ printf("[SEND AUTH RESPONSE DONE]: %d\n",ue_id);
 
 
 printf("[RECV SECURITY MODE DONE]: %d\n", ue_id);
+log_update( log->security_mode_command_time, log->last_update);
     /* Send Security mode complete */
     pthread_mutex_lock(&s1ap_send_lock);
     gmmbuf = testgmm_build_security_mode_complete(test_ue, nasbuf);
@@ -303,6 +335,8 @@ printf("[RECV SECURITY MODE DONE]: %d\n", ue_id);
     pthread_mutex_unlock(&s1ap_send_lock);
 
 printf("[SEND SECURITY MODE DONE]: %d\n",ue_id);
+log_update(log->security_mode_complete_time, log->last_update);
+
     /* Receive Initial context setup request */
 /*
     recvbuf = testgnb_ngap_read(ngap);
@@ -316,6 +350,7 @@ printf("[SEND SECURITY MODE DONE]: %d\n",ue_id);
 
 
 printf("[RECV INITIAL CONTEXT SETUP DONE]: %d\n", ue_id);
+log_update( log->initial_context_setup_receive_time, log->last_update);
     /* Send Initial context setup failure */
     pthread_mutex_lock(&s1ap_send_lock);
     sendbuf = testngap_build_initial_context_setup_failure(test_ue,
@@ -326,6 +361,7 @@ printf("[RECV INITIAL CONTEXT SETUP DONE]: %d\n", ue_id);
     pthread_mutex_unlock(&s1ap_send_lock);
 
 printf("[SEND INITIAL CONTEXT SETUP FAILURE DONE]: %d\n",ue_id);
+log_update( log->initial_context_setup_send_time, log->last_update);
     /* Receive UE context release command */
 /*
     recvbuf = testgnb_ngap_read(ngap);
@@ -339,6 +375,7 @@ printf("[SEND INITIAL CONTEXT SETUP FAILURE DONE]: %d\n",ue_id);
 
 
 printf("[RECV UE CONTEXT RELEASE DONE]: %d\n", ue_id);
+
     /* Send UE context release complete */
     pthread_mutex_lock(&s1ap_send_lock);
     sendbuf = testngap_build_ue_context_release_complete(test_ue);
@@ -348,6 +385,7 @@ printf("[RECV UE CONTEXT RELEASE DONE]: %d\n", ue_id);
     pthread_mutex_unlock(&s1ap_send_lock);
 
 printf("[SEND UE CONTEXT RELEASE DONE]: %d\n",ue_id);
+log_update( log->UE_release_complete_time, log->last_update);
     /********** Remove Subscriber in Database */
 /*
     doc = BCON_NEW("imsi", BCON_UTF8(test_ue->imsi));
@@ -366,6 +404,58 @@ int get_ran_ue_ngap_id(ogs_pkbuf_t *pkbuf) {
 	test_ue_t temp_ue;
 	return testngap_get_ran_ue_ngap_id(&temp_ue, pkbuf);
 	//return temp_ue.ran_ue_ngap_id;
+}
+void *thread_gtpu_read(void *arg) {
+	gtp_header_t *gtp_h = NULL;
+	int rc;
+	int i;
+	c_uint32_t teid, teid_reversed;
+
+    	//signal(SIGINT, hsignal);
+	/*
+	while(1) {
+		sem_wait(&occupied_gtpu_read);
+		if ( all_terminated )
+			return NULL;
+
+		recvbuf_gtpu = pkbuf_alloc(0, 200 enough for ICMP);
+		rc = 0;
+		while(1) {
+			rc = core_recv(gtpu_sock1, recvbuf_gtpu->payload, recvbuf_gtpu->len, 0);
+			if ( rc == -2 ) continue;
+			else if ( rc <= 0 ) {
+				if ( errno == EAGAIN) continue;
+				break;
+			}
+			else break;
+		}
+		recvbuf_gtpu->len = rc;
+		gtp_h = (gtp_header_t*) recvbuf_gtpu->payload;
+		teid_reversed = gtp_h->teid;
+		teid = 0;
+		while(teid_reversed) {
+			teid = (teid<<8)+(teid_reversed&(0xff));
+			teid_reversed>>=8;
+		}
+		for ( i = 0 ; i < THREADNUM ; ++i )
+			if ( ue_teid[i] == teid ) break;
+		if ( i == THREADNUM ) {
+			fprintf(stderr,"ERROR: no thread found for teid %d\n",teid);
+			fprintf(stderr,"len: %d\n",recvbuf_gtpu->len);
+			for ( i = 0 ; i < recvbuf_gtpu->len ; ++i )
+				fprintf(stderr,"%x ",*(char*)(recvbuf_gtpu->payload+i));
+			fprintf(stderr,"\n");
+			pkbuf_free(recvbuf_gtpu);
+			continue;
+		}
+		recvbuf_thread[i] = pkbuf_alloc(0, 200);
+		memcpy(recvbuf_thread[i]->payload, recvbuf_gtpu->payload, recvbuf_gtpu->len);
+		recvbuf_thread[i]->len = recvbuf_gtpu->len;
+		pkbuf_free(recvbuf_gtpu);
+		sem_post(&received_sem_ue[i]);
+	}
+*/
+	return NULL;
 }
 
 void *thread_s1ap_read(void *arg)
@@ -421,7 +511,7 @@ abts_suite *test_ue_context(abts_suite *suite)
     //printf("sock init done!\n");
 
     pthread_create(&enb_reader, NULL, thread_s1ap_read, NULL);
-    //pthread_create(&gtpu_reader, NULL, thread_gtpu_read, NULL);
+    pthread_create(&gtpu_reader, NULL, thread_gtpu_read, NULL);
     for ( i = 0 ; i < THREADNUM ; ++i ) a[i] = i;
     for ( i = 0 ; i < THREADNUM ; ++i ) {
 	    //printf("[i] %d\n",i);
@@ -432,10 +522,34 @@ abts_suite *test_ue_context(abts_suite *suite)
 	    pthread_join(ue[i], NULL);
     all_terminated = 1;
     sem_post(&occupied_s1ap_read);
-    //sem_post(&occupied_gtpu_read);
+    sem_post(&occupied_gtpu_read);
     pthread_join(enb_reader, NULL);
-    //pthread_join(gtpu_reader, NULL);
+    pthread_join(gtpu_reader, NULL);
     sock_close();
+
+        FILE *output_log = fopen("output.log", "a+");
+
+    for ( i = 0 ; i < THREADNUM ; ++i ) {
+	    fprintf(output_log, "ue_id: %d\n",i);
+	    fprintf(output_log, "init ue msg: %ld\n",ue_log[i].init_ue_msg_time );
+	    fprintf(output_log, "auth request: %ld\n",ue_log[i].auth_request_time);
+	    fprintf(output_log, "auth response: %ld\n",ue_log[i].auth_response_time);
+	    fprintf(output_log, "security mode command: %ld\n",ue_log[i].security_mode_command_time );
+	    fprintf(output_log, "security mode complete: %ld\n",ue_log[i].security_mode_complete_time );
+	    fprintf(output_log, "ESM info request: %ld\n",ue_log[i].ESM_info_request_time );
+	    fprintf(output_log, "ESM info response: %ld\n",ue_log[i].ESM_info_response_time );
+	    fprintf(output_log, "UE info: %ld\n",ue_log[i].UE_info_time);
+	    fprintf(output_log, "initial_context send: %ld\n",ue_log[i].initial_context_setup_send_time );
+	    fprintf(output_log, "initial_context receive: %ld\n",ue_log[i].initial_context_setup_receive_time );
+	    fprintf(output_log, "activate EPS: %ld\n",ue_log[i].activate_EPS_time );
+	    fprintf(output_log, "EMM receive: %ld\n",ue_log[i].receive_EMM_time);
+
+	    fprintf(output_log, "detach request: %ld\n",ue_log[i].detach_request_time);
+	    fprintf(output_log, "UE release command: %ld\n",ue_log[i].UE_release_command_time );
+	    fprintf(output_log, "UE release complete: %ld\n",ue_log[i].UE_release_complete_time );
+	    fprintf(output_log, "\n");
+    }
+    fclose( output_log);
 
    //abts_run_test(suite, test1_func, NULL);
    //abts_run_test(suite, test2_func, NULL);
