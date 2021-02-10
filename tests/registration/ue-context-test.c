@@ -26,8 +26,9 @@ ogs_socknode_t *gtpu;
 
 ogs_pkbuf_t *sendbuf;
 ogs_pkbuf_t *recvbuf;
-ogs_pkbuf_t *recvbuf_gtpu; // temp use
+//ogs_pkbuf_t *recvbuf_gtpu; // temp use
 ogs_pkbuf_t *recvbuf_thread[THREADNUM]; // tempuse
+int ue_teid[THREADNUM];
 
 // thread locks
 #include <pthread.h>
@@ -75,7 +76,7 @@ void sock_init(char *ip_amf, char *ip_upf) {
     /* gNB connects to UPF */
     //gtpu = test_gtpu_server(1, AF_INET);
     //gtpu = test_gtpu_server_ip(1, AF_INET, "127.0.0.2");
-    //gtpu = test_gtpu_server_ip(1, AF_INET, ip_upf);
+    gtpu = test_gtpu_server_ip(1, AF_INET, ip_upf);
     //ABTS_PTR_NOTNULL(tc, gtpu);
 
     /* Send NG-Setup Reqeust */
@@ -92,7 +93,7 @@ void sock_init(char *ip_amf, char *ip_upf) {
 }
 void sock_close() {
     /* gNB disonncect from UPF */
-    //testgnb_gtpu_close(gtpu);
+    testgnb_gtpu_close(gtpu);
 
     /* gNB disonncect from AMF */
     testgnb_ngap_close(ngap);
@@ -351,6 +352,97 @@ log_update(log->security_mode_complete_time, log->last_update);
 
 printf("[RECV INITIAL CONTEXT SETUP DONE]: %d\n", ue_id);
 log_update( log->initial_context_setup_receive_time, log->last_update);
+
+
+/* UPF - ICMP */
+
+    /* Send InitialContextSetupResponse */
+    pthread_mutex_lock(&s1ap_send_lock);
+
+    sendbuf = testngap_build_initial_context_setup_response(test_ue, false);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    /* GUTI Not Present
+     * SKIP Send Registration complete */
+    /* SKIP Receive Configuration update command */
+
+    /* Send PDU session establishment request */
+    sess = test_sess_add_by_dnn_and_psi(test_ue, "internet", 5);
+    ogs_assert(sess);
+
+    sess->ul_nas_transport_param.request_type =
+        OGS_NAS_5GS_REQUEST_TYPE_INITIAL;
+    sess->ul_nas_transport_param.dnn = 1;
+    sess->ul_nas_transport_param.s_nssai = 1;
+    pthread_mutex_lock(&s1ap_send_lock);
+
+    gsmbuf = testgsm_build_pdu_session_establishment_request(sess);
+    ABTS_PTR_NOTNULL(tc, gsmbuf);
+    gmmbuf = testgmm_build_ul_nas_transport(sess,
+            OGS_NAS_PAYLOAD_CONTAINER_N1_SM_INFORMATION, gsmbuf);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+
+    /* Receive PDUSessionResourceSetupRequest +
+     * DL NAS transport +
+     * PDU session establishment accept */
+    /*
+    recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc,
+            NGAP_ProcedureCode_id_PDUSessionResourceSetup,
+            test_ue->ngap_procedure_code);
+	    */
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+
+
+    /* Send PDUSessionResourceSetupResponse */
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_sess_build_pdu_session_resource_setup_response(sess);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    /* Send GTP-U ICMP Packet */
+    pthread_mutex_lock(&s1ap_send_lock);
+    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
+    ogs_assert(qos_flow);
+    // find teid
+    ue_teid[ran_ue_ngap_id] = qos_flow->sess->upf_n3_teid;
+    rv = test_gtpu_send_ping(gtpu, qos_flow, TEST_PING_IPV4);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+
+    /* Receive GTP-U ICMP Packet */
+    /*
+    recvbuf = testgnb_gtpu_read(gtpu);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);
+
+    ogs_msleep(300);
+    */
+    sem_post(&occupied_gtpu_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+
+
+/* UPF - ICMP */
+
+
     /* Send Initial context setup failure */
     pthread_mutex_lock(&s1ap_send_lock);
     sendbuf = testngap_build_initial_context_setup_failure(test_ue,
@@ -406,18 +498,18 @@ int get_ran_ue_ngap_id(ogs_pkbuf_t *pkbuf) {
 	//return temp_ue.ran_ue_ngap_id;
 }
 void *thread_gtpu_read(void *arg) {
-	gtp_header_t *gtp_h = NULL;
+	ogs_gtp_header_t *gtp_h = NULL;
 	int rc;
 	int i;
-	c_uint32_t teid, teid_reversed;
+	__uint32_t teid, teid_reversed;
 
     	//signal(SIGINT, hsignal);
-	/*
+	
 	while(1) {
 		sem_wait(&occupied_gtpu_read);
 		if ( all_terminated )
 			return NULL;
-
+/*
 		recvbuf_gtpu = pkbuf_alloc(0, 200 enough for ICMP);
 		rc = 0;
 		while(1) {
@@ -429,8 +521,11 @@ void *thread_gtpu_read(void *arg) {
 			}
 			else break;
 		}
-		recvbuf_gtpu->len = rc;
-		gtp_h = (gtp_header_t*) recvbuf_gtpu->payload;
+		*/
+		recvbuf = testgnb_gtpu_read(gtpu);
+		//recvbuf_gtpu->len = rc;
+		gtp_h = (ogs_gtp_header_t*) recvbuf->data;
+
 		teid_reversed = gtp_h->teid;
 		teid = 0;
 		while(teid_reversed) {
@@ -441,20 +536,20 @@ void *thread_gtpu_read(void *arg) {
 			if ( ue_teid[i] == teid ) break;
 		if ( i == THREADNUM ) {
 			fprintf(stderr,"ERROR: no thread found for teid %d\n",teid);
-			fprintf(stderr,"len: %d\n",recvbuf_gtpu->len);
-			for ( i = 0 ; i < recvbuf_gtpu->len ; ++i )
-				fprintf(stderr,"%x ",*(char*)(recvbuf_gtpu->payload+i));
+			fprintf(stderr,"len: %d\n",recvbuf->len);
+			for ( i = 0 ; i < recvbuf->len ; ++i )
+				fprintf(stderr,"%x ",*(char*)(recvbuf->data+i));
 			fprintf(stderr,"\n");
-			pkbuf_free(recvbuf_gtpu);
+			ogs_pkbuf_free(recvbuf);
 			continue;
 		}
-		recvbuf_thread[i] = pkbuf_alloc(0, 200);
-		memcpy(recvbuf_thread[i]->payload, recvbuf_gtpu->payload, recvbuf_gtpu->len);
-		recvbuf_thread[i]->len = recvbuf_gtpu->len;
-		pkbuf_free(recvbuf_gtpu);
+		recvbuf_thread[i] = ogs_pkbuf_alloc(0, 200); // enough for icmp
+		memcpy(recvbuf_thread[i]->data, recvbuf->data, recvbuf->len);
+		recvbuf_thread[i]->len = recvbuf->len;
+		ogs_pkbuf_free(recvbuf);
 		sem_post(&received_sem_ue[i]);
 	}
-*/
+
 	return NULL;
 }
 

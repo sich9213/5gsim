@@ -26,8 +26,8 @@ ogs_socknode_t *test_gtpu_server_ip(int index, int family, char *hostname)
     ogs_socknode_t *node = NULL;
     ogs_sock_t *sock = NULL;
 
+    struct hostent *hostinfo;
     if (index == 1) {
-	    struct hostent *hostinfo;
 	    hostinfo = gethostbyname(hostname);
 	    test_self()->gnb1_addr->hostname = hostname;
 	    test_self()->gnb1_addr->sin.sin_addr = *(struct in_addr*)hostinfo->h_addr;

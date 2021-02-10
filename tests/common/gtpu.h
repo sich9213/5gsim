@@ -27,6 +27,8 @@ extern "C" {
 #define testgnb_gtpu_read(x) test_gtpu_read(x)
 #define testgnb_gtpu_close(x) test_gtpu_close(x)
 
+	ogs_socknode_t *test_gtpu_server_ip(int index, int family, char *hostname);
+
 ogs_socknode_t *test_gtpu_server(int index, int family);
 ogs_pkbuf_t *test_gtpu_read(ogs_socknode_t *node);
 void test_gtpu_close(ogs_socknode_t *node);
