@@ -23,6 +23,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+	
+int testngap_get_psi_pdu_session_resource_setup_request(
+        test_ue_t *test_ue, ogs_ngap_message_t *message);
 
 void testngap_handle_ng_setup_response(
         test_ue_t *test_ue, ogs_ngap_message_t *message);

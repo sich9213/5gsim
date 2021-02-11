@@ -19,8 +19,11 @@
 
 #include "test-common.h"
 int testngap_get_ran_ue_ngap_id(test_ue_t *test_ue, ogs_pkbuf_t *pkbuf) {
+	// not must to get ran_ue_ngap_id
+	// possible return the pdu session id, see CASE 4
     int rv;
     int i;  
+    int res;
     ogs_ngap_message_t message;
 
     NGAP_NGAP_PDU_t *pdu = NULL;
@@ -36,32 +39,36 @@ int testngap_get_ran_ue_ngap_id(test_ue_t *test_ue, ogs_pkbuf_t *pkbuf) {
 
     pdu = &message;
     ogs_assert(pdu);
-printf("[GET RAN UE ID BEGIN]\n");
+//printf("[GET RAN UE ID BEGIN]\n");
     switch (pdu->present) {
     case NGAP_NGAP_PDU_PR_initiatingMessage:
-	    printf("{BRANCH} init msg\n");
+	    //printf("{BRANCH} init msg\n");
         initiatingMessage = pdu->choice.initiatingMessage;
         ogs_assert(initiatingMessage);
 
         switch (initiatingMessage->procedureCode) {
         case NGAP_ProcedureCode_id_DownlinkNASTransport:
-		printf("[CASE 1]\n");
+		//printf("[CASE 1]\n");
             testngap_get_ran_ue_ngap_id_downlink_nas_transport(test_ue, pdu);
+	    res = test_ue->ran_ue_ngap_id;
             break;
         case NGAP_ProcedureCode_id_InitialContextSetup:
-		printf("[CASE 2]\n");
+		//printf("[CASE 2]\n");
             testngap_get_ran_ue_ngap_id_initial_context_setup_request(test_ue, pdu);
+	    res = test_ue->ran_ue_ngap_id;
             break;
         case NGAP_ProcedureCode_id_UEContextRelease:
-		printf("[CASE 3]\n");
+		//printf("[CASE 3]\n");
             testngap_get_ran_ue_ngap_id_ue_release_context_command(test_ue, pdu);
+	    res = test_ue->ran_ue_ngap_id;
             break;
         case NGAP_ProcedureCode_id_PDUSessionResourceSetup:
-		printf("[CASE 4]\n");
-            testngap_handle_pdu_session_resource_setup_request(test_ue, pdu);
+		printf("[CASE 4] special handle\n");
+		// return the psi
+		res = testngap_get_psi_pdu_session_resource_setup_request(test_ue, pdu);
             break;
         case NGAP_ProcedureCode_id_PDUSessionResourceRelease:
-		printf("[CASE 5]\n");
+		printf("[CASE 5] not handle\n");
             testngap_handle_pdu_session_resource_release_command(test_ue, pdu);
             break;
         case NGAP_ProcedureCode_id_ErrorIndication:
@@ -74,13 +81,13 @@ printf("[GET RAN UE ID BEGIN]\n");
         }
         break;
     case NGAP_NGAP_PDU_PR_successfulOutcome :
-	    printf("{BRANCH} succ outcome\n");
+	    printf("{BRANCH} succ outcome not handle\n");
         successfulOutcome = pdu->choice.successfulOutcome;
         ogs_assert(successfulOutcome);
 
         switch (successfulOutcome->procedureCode) {
         case NGAP_ProcedureCode_id_NGSetup:
-		printf("[CASE 6]\n");
+		printf("[CASE 6] not handle\n");
             testngap_handle_ng_setup_response(test_ue, pdu);
             break;
         default:
@@ -90,7 +97,7 @@ printf("[GET RAN UE ID BEGIN]\n");
         }
         break;
     case NGAP_NGAP_PDU_PR_unsuccessfulOutcome :
-	    printf("{BRANCH} unsucc outcome\n");
+	    //printf("{BRANCH} unsucc outcome\n");
         unsuccessfulOutcome = pdu->choice.unsuccessfulOutcome;
         ogs_assert(unsuccessfulOutcome);
 
@@ -110,8 +117,8 @@ printf("[GET RAN UE ID BEGIN]\n");
 
     ogs_ngap_free(&message);
     ogs_pkbuf_free(pkbuf);
-printf("[GET RAN UE ID END]\n");
-return test_ue->ran_ue_ngap_id;
+//printf("[GET RAN UE ID END]\n");
+return res;
 }
 void testngap_recv(test_ue_t *test_ue, ogs_pkbuf_t *pkbuf)
 {

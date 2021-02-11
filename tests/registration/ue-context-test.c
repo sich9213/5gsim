@@ -27,8 +27,10 @@ ogs_socknode_t *gtpu;
 ogs_pkbuf_t *sendbuf;
 ogs_pkbuf_t *recvbuf;
 //ogs_pkbuf_t *recvbuf_gtpu; // temp use
-ogs_pkbuf_t *recvbuf_thread[THREADNUM]; // tempuse
-int ue_teid[THREADNUM];
+ogs_pkbuf_t *recvbuf_thread[3*THREADNUM]; // temp use
+#include <netinet/ip_icmp.h>
+struct icmp *icmp_record[3*THREADNUM]; // record every icmp for each UE
+
 
 // thread locks
 #include <pthread.h>
@@ -36,7 +38,7 @@ int ue_teid[THREADNUM];
 sem_t occupied_s1ap_read;
 sem_t occupied_gtpu_read;
 int all_terminated = 0;
-sem_t received_sem_ue[THREADNUM];
+sem_t received_sem_ue[3*THREADNUM];
 
 // mutex for sending
 pthread_mutex_t s1ap_send_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -66,7 +68,7 @@ struct UE_LOG {
 }ue_log[THREADNUM];
 
 
-void sock_init(char *ip_amf, char *ip_upf) {
+void sock_init(char *ip_amf, char *ip_gnb) {
 	
     /* gNB connects to AMF */
     //ngap = testngap_client(AF_INET);
@@ -76,7 +78,7 @@ void sock_init(char *ip_amf, char *ip_upf) {
     /* gNB connects to UPF */
     //gtpu = test_gtpu_server(1, AF_INET);
     //gtpu = test_gtpu_server_ip(1, AF_INET, "127.0.0.2");
-    gtpu = test_gtpu_server_ip(1, AF_INET, ip_upf);
+    gtpu = test_gtpu_server_ip(1, AF_INET, ip_gnb);
     //ABTS_PTR_NOTNULL(tc, gtpu);
 
     /* Send NG-Setup Reqeust */
@@ -103,7 +105,396 @@ void sock_close() {
 
 }
 
-static void test1_func(abts_case *tc, void *data)
+static void test_icmp_func(abts_case *tc, void *data)
+{
+    int rv;
+    ogs_pkbuf_t *gmmbuf;
+    ogs_pkbuf_t *gsmbuf;
+    ogs_pkbuf_t *nasbuf;
+    ogs_ngap_message_t message;
+    int i;
+
+    ogs_nas_5gs_mobile_identity_suci_t mobile_identity_suci;
+    test_ue_t *test_ue = NULL;
+    test_sess_t *sess = NULL;
+    test_bearer_t *qos_flow = NULL;
+
+    int ue_id = ((int*)data)[0];
+    if ( ue_id < 0 || ue_id > 10000 ) { printf("ue_id out of range: %d\n", ue_id); return; }
+
+    const char *_k_string = "70d49a71dd1a2b806a25abe0ef749f1e";
+    uint8_t k[OGS_KEY_LEN];
+    const char *_opc_string = "6f1bf53d624b3a43af6592854e2444c7";
+    uint8_t opc[OGS_KEY_LEN];
+
+    mongoc_collection_t *collection = NULL;
+    bson_t *doc = NULL;
+    int64_t count = 0;
+    bson_error_t error;
+
+    int imsi = 21309 + ue_id;
+    long ran_ue_ngap_id = ue_id;
+
+
+    /* Setup Test UE & Session Context */
+    memset(&mobile_identity_suci, 0, sizeof(mobile_identity_suci));
+
+    mobile_identity_suci.h.supi_format = OGS_NAS_5GS_SUPI_FORMAT_IMSI;
+    mobile_identity_suci.h.type = OGS_NAS_5GS_MOBILE_IDENTITY_SUCI;
+    mobile_identity_suci.routing_indicator1 = 0;
+    mobile_identity_suci.routing_indicator2 = 0xf;
+    mobile_identity_suci.routing_indicator3 = 0xf;
+    mobile_identity_suci.routing_indicator4 = 0xf;
+    mobile_identity_suci.protection_scheme_id = OGS_NAS_5GS_NULL_SCHEME;
+    mobile_identity_suci.home_network_pki_value = 0;
+    mobile_identity_suci.scheme_output[0] = 0;
+    mobile_identity_suci.scheme_output[1] = 0;
+
+    int timsi = imsi;
+    int j;
+    //printf("timsi: %d\n",timsi);
+    for ( j = 4 ; j >= 2 ; --j ) { // AUTO - GENERATE NEW IMSI based on ue_id
+	    mobile_identity_suci.scheme_output[j] = 0;
+	    mobile_identity_suci.scheme_output[j] *= 16;
+	    mobile_identity_suci.scheme_output[j] += timsi%10;
+	    timsi /= 10;
+
+	    mobile_identity_suci.scheme_output[j] *= 16;
+	    mobile_identity_suci.scheme_output[j] += timsi%10;
+	    timsi /= 10;
+    }
+
+
+    test_ue = test_ue_add_by_suci(&mobile_identity_suci, 13);
+    test_ue->ran_ue_ngap_id = ran_ue_ngap_id;
+    ogs_assert(test_ue);
+
+    test_ue->nr_cgi.cell_id = 0x40001;
+
+    test_ue->nas.registration.type = OGS_NAS_KSI_NO_KEY_IS_AVAILABLE;
+    test_ue->nas.registration.follow_on_request = 1;
+    test_ue->nas.registration.value = OGS_NAS_5GS_REGISTRATION_TYPE_INITIAL;
+
+    OGS_HEX(_k_string, strlen(_k_string), test_ue->k);
+    OGS_HEX(_opc_string, strlen(_opc_string), test_ue->opc);
+
+    struct UE_LOG *log = &ue_log[ue_id];
+    log_reset_time(log->last_update);
+
+    /* Send Registration request */
+    gmmbuf = testgmm_build_registration_request(test_ue, NULL);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+
+    test_ue->registration_request_param.gmm_capability = 1;
+    test_ue->registration_request_param.requested_nssai = 1;
+    test_ue->registration_request_param.last_visited_registered_tai = 1;
+    test_ue->registration_request_param.ue_usage_setting = 1;
+    nasbuf = testgmm_build_registration_request(test_ue, NULL);
+    ABTS_PTR_NOTNULL(tc, nasbuf);
+
+    pthread_mutex_lock(&s1ap_send_lock);
+    test_ue->ran_ue_ngap_id --; // Due to it been increased inside below function call
+    sendbuf = testngap_build_initial_ue_message(test_ue, gmmbuf, false, true);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    printf("[SEND INIT UE MSG DONE]: %d\n",ue_id);
+    log_update( log->init_ue_msg_time, log->last_update );
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    /* Receive Authentication request */
+    /*
+    recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    */
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV AUTH REQUEST DONE]: %d\n", ue_id);
+    log_update(log->auth_request_time, log->last_update);
+
+    /* Send Authentication response */
+    pthread_mutex_lock(&s1ap_send_lock);
+    gmmbuf = testgmm_build_authentication_response(test_ue);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND AUTH RESPONSE DONE]: %d\n",ue_id);
+    log_update( log->auth_response_time, log->last_update);
+
+    /* Receive Security mode command */
+    /*
+    recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    */
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV SECURITY MODE DONE]: %d\n", ue_id);
+    log_update( log->security_mode_command_time, log->last_update);
+
+    /* Send Security mode complete */
+    pthread_mutex_lock(&s1ap_send_lock);
+    gmmbuf = testgmm_build_security_mode_complete(test_ue, nasbuf);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND SECURITY MODE DONE]: %d\n",ue_id);
+    log_update(log->security_mode_complete_time, log->last_update);
+
+    /* Receive InitialContextSetupRequest +
+     * Registration accept */
+    /*
+    recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc,
+            NGAP_ProcedureCode_id_InitialContextSetup,
+            test_ue->ngap_procedure_code);
+	    */
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV INITIAL CONTEXT SETUP DONE]: %d\n", ue_id);
+    log_update( log->initial_context_setup_receive_time, log->last_update);
+
+    /* Send Registration request */
+    test_ue->registration_request_param.guti = 1;
+    gmmbuf = testgmm_build_registration_request(test_ue, NULL);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+
+    test_ue->registration_request_param.gmm_capability = 1;
+    test_ue->registration_request_param.requested_nssai = 1;
+    test_ue->registration_request_param.last_visited_registered_tai = 1;
+    test_ue->registration_request_param.ue_usage_setting = 1;
+    nasbuf = testgmm_build_registration_request(test_ue, NULL);
+    ABTS_PTR_NOTNULL(tc, nasbuf);
+
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_build_initial_ue_message(test_ue, gmmbuf, false, true);
+    ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    printf("[SEND REGISTRATION REQUEST DONE]: %d\n",ue_id);
+    log_update( log->init_ue_msg_time, log->last_update );
+    //printf("ran_ue_ngap_id: %d\n",test_ue->ran_ue_ngap_id);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    /* OLD Receive UEContextReleaseCommand */
+    /*
+    recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc,
+            NGAP_ProcedureCode_id_UEContextRelease,
+            test_ue->ngap_procedure_code);*/
+    ran_ue_ngap_id --;
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV OLD UE CONTEXT RELEASE COMMAND DONE]: %d\n",ue_id);
+
+    /* Send OLD UE Context Release Complete */
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    printf("[SEND OLD UE CONTEXT RELEASE COMPLETE DONE]: %d\n",ue_id);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    ran_ue_ngap_id ++;
+
+    /* Receive Authentication request */
+    /*
+    recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf); */
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV AUTH REQUEST DONE]: %d\n", ue_id);
+
+    /* Send Authentication response */
+    pthread_mutex_lock(&s1ap_send_lock);
+    gmmbuf = testgmm_build_authentication_response(test_ue);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND AUTH RESPONSE DONE]: %d\n",ue_id);
+
+    /* Receive Security mode command */
+    /*recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);*/
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV SECURITY MODE DONE]: %d\n", ue_id);
+
+    /* Send Security mode complete */
+    pthread_mutex_lock(&s1ap_send_lock);
+    gmmbuf = testgmm_build_security_mode_complete(test_ue, nasbuf);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND SECURITY MODE DONE]: %d\n",ue_id);
+
+    /* Receive InitialContextSetupRequest +
+     * Registration accept */
+    /*recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc,
+            NGAP_ProcedureCode_id_InitialContextSetup,
+            test_ue->ngap_procedure_code);*/
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV REGISTRATION ACCEPT]: %d\n",ue_id);
+
+    /* Send InitialContextSetupResponse */
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_build_initial_context_setup_response(test_ue, false);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND INIT CONTEXT SETUP RESPONSE DONE]: %d\n",ue_id);
+
+
+    /* GUTI Not Present
+     * SKIP Send Registration complete */
+    /* SKIP Receive Configuration update command */
+
+    /* Send PDU session establishment request */
+    int psi = ran_ue_ngap_id;
+    sess = test_sess_add_by_dnn_and_psi(test_ue, "internet", psi);
+
+    ogs_assert(sess);
+
+    sess->ul_nas_transport_param.request_type =
+        OGS_NAS_5GS_REQUEST_TYPE_INITIAL;
+    sess->ul_nas_transport_param.dnn = 1;
+    sess->ul_nas_transport_param.s_nssai = 1;
+    pthread_mutex_lock(&s1ap_send_lock);
+    gsmbuf = testgsm_build_pdu_session_establishment_request(sess);
+    ABTS_PTR_NOTNULL(tc, gsmbuf);
+    gmmbuf = testgmm_build_ul_nas_transport(sess,
+            OGS_NAS_PAYLOAD_CONTAINER_N1_SM_INFORMATION, gsmbuf);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    printf("[SEND PDU SESION EST REQUEST DONE]: %d\n",ue_id);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    /* Receive PDUSessionResourceSetupRequest +
+     * DL NAS transport +
+     * PDU session establishment accept */
+    /*recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc,
+            NGAP_ProcedureCode_id_PDUSessionResourceSetup,
+            test_ue->ngap_procedure_code);*/
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+    printf("[RECV PDU SETUP REQUEST DONE]: %d\n",ue_id);
+
+
+    /* Send PDUSessionResourceSetupResponse */
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_sess_build_pdu_session_resource_setup_response(sess);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND PDU SETUP RESPONSE DONE]: %d\n",ue_id);
+
+    /* Send GTP-U ICMP Packet */
+    pthread_mutex_lock(&s1ap_send_lock);
+    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
+    ogs_assert(qos_flow);
+    icmp_record[ue_id] = malloc(sizeof(struct icmp));
+
+    printf("destination ip is: %s\n",TEST_PING_IPV4);
+    rv = test_gtpu_send_ping_2(gtpu, qos_flow, TEST_PING_IPV4, icmp_record[ue_id]);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND GTP ICMP DONE]: %d\n",ue_id);
+
+    /* Receive GTP-U ICMP Packet */
+    /*
+    recvbuf = testgnb_gtpu_read(gtpu);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    ogs_pkbuf_free(recvbuf);*/
+    sem_post(&occupied_gtpu_read);
+    sem_wait(&received_sem_ue[ue_id]);
+
+    //ogs_msleep(300);
+
+    /* Send Initial context setup failure */
+        pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_build_initial_context_setup_failure(test_ue,
+            NGAP_Cause_PR_radioNetwork,
+            NGAP_CauseRadioNetwork_radio_connection_with_ue_lost);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND INITIAL CONTEXT SETUP FAILURE DONE]: %d\n",ue_id);
+
+    /* Receive UEContextReleaseCommand */
+    /*recvbuf = testgnb_ngap_read(ngap);
+    ABTS_PTR_NOTNULL(tc, recvbuf);
+    testngap_recv(test_ue, recvbuf);
+    ABTS_INT_EQUAL(tc,
+            NGAP_ProcedureCode_id_UEContextRelease,
+            test_ue->ngap_procedure_code);*/
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
+    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
+    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
+
+    /* Send UEContextReleaseComplete */
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_build_ue_context_release_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    printf("[SEND UE CONTEXT RELEASE DONE]: %d\n",ue_id);
+
+    sock_close();
+    /* Clear Test UE Context */
+    test_ue_remove(test_ue);
+}
+
+static void test_registration_func(abts_case *tc, void *data)
 {
 	ogs_pkbuf_t *gmmbuf;
 	ogs_pkbuf_t *gsmbuf;
@@ -354,95 +745,6 @@ printf("[RECV INITIAL CONTEXT SETUP DONE]: %d\n", ue_id);
 log_update( log->initial_context_setup_receive_time, log->last_update);
 
 
-/* UPF - ICMP */
-
-    /* Send InitialContextSetupResponse */
-    pthread_mutex_lock(&s1ap_send_lock);
-
-    sendbuf = testngap_build_initial_context_setup_response(test_ue, false);
-    ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
-    pthread_mutex_unlock(&s1ap_send_lock);
-
-    /* GUTI Not Present
-     * SKIP Send Registration complete */
-    /* SKIP Receive Configuration update command */
-
-    /* Send PDU session establishment request */
-    sess = test_sess_add_by_dnn_and_psi(test_ue, "internet", 5);
-    ogs_assert(sess);
-
-    sess->ul_nas_transport_param.request_type =
-        OGS_NAS_5GS_REQUEST_TYPE_INITIAL;
-    sess->ul_nas_transport_param.dnn = 1;
-    sess->ul_nas_transport_param.s_nssai = 1;
-    pthread_mutex_lock(&s1ap_send_lock);
-
-    gsmbuf = testgsm_build_pdu_session_establishment_request(sess);
-    ABTS_PTR_NOTNULL(tc, gsmbuf);
-    gmmbuf = testgmm_build_ul_nas_transport(sess,
-            OGS_NAS_PAYLOAD_CONTAINER_N1_SM_INFORMATION, gsmbuf);
-    ABTS_PTR_NOTNULL(tc, gmmbuf);
-    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
-    ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
-    pthread_mutex_unlock(&s1ap_send_lock);
-
-
-    /* Receive PDUSessionResourceSetupRequest +
-     * DL NAS transport +
-     * PDU session establishment accept */
-    /*
-    recvbuf = testgnb_ngap_read(ngap);
-    ABTS_PTR_NOTNULL(tc, recvbuf);
-    testngap_recv(test_ue, recvbuf);
-    ABTS_INT_EQUAL(tc,
-            NGAP_ProcedureCode_id_PDUSessionResourceSetup,
-            test_ue->ngap_procedure_code);
-	    */
-    sem_post(&occupied_s1ap_read);
-    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
-    testngap_recv(test_ue, recvbuf_thread[ran_ue_ngap_id]);
-    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
-
-
-    /* Send PDUSessionResourceSetupResponse */
-    pthread_mutex_lock(&s1ap_send_lock);
-    sendbuf = testngap_sess_build_pdu_session_resource_setup_response(sess);
-    ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
-    pthread_mutex_unlock(&s1ap_send_lock);
-
-    /* Send GTP-U ICMP Packet */
-    pthread_mutex_lock(&s1ap_send_lock);
-    qos_flow = test_qos_flow_find_by_qfi(sess, 1);
-    ogs_assert(qos_flow);
-    // find teid
-    ue_teid[ran_ue_ngap_id] = qos_flow->sess->upf_n3_teid;
-    rv = test_gtpu_send_ping(gtpu, qos_flow, TEST_PING_IPV4);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
-    pthread_mutex_unlock(&s1ap_send_lock);
-
-
-    /* Receive GTP-U ICMP Packet */
-    /*
-    recvbuf = testgnb_gtpu_read(gtpu);
-    ABTS_PTR_NOTNULL(tc, recvbuf);
-    ogs_pkbuf_free(recvbuf);
-
-    ogs_msleep(300);
-    */
-    sem_post(&occupied_gtpu_read);
-    sem_wait(&received_sem_ue[ran_ue_ngap_id]);
-    ogs_pkbuf_free(recvbuf_thread[ran_ue_ngap_id]);
-
-
-/* UPF - ICMP */
-
-
     /* Send Initial context setup failure */
     pthread_mutex_lock(&s1ap_send_lock);
     sendbuf = testngap_build_initial_context_setup_failure(test_ue,
@@ -524,6 +826,7 @@ void *thread_gtpu_read(void *arg) {
 		*/
 		recvbuf = testgnb_gtpu_read(gtpu);
 		//recvbuf_gtpu->len = rc;
+		/*
 		gtp_h = (ogs_gtp_header_t*) recvbuf->data;
 
 		teid_reversed = gtp_h->teid;
@@ -543,6 +846,20 @@ void *thread_gtpu_read(void *arg) {
 			ogs_pkbuf_free(recvbuf);
 			continue;
 		}
+		*/
+		struct icmp* icmp_ptr = (struct icmp*) (recvbuf->data + recvbuf->len - 8);
+
+		for ( i = 0 ; i < THREADNUM ; ++i )
+			if ( icmp_ptr->icmp_id ==  icmp_record[i]->icmp_id && icmp_ptr->icmp_seq == icmp_record[i]->icmp_seq) break;
+		if ( i == THREADNUM ) {
+			fprintf(stderr,"ERROR: no thread found for icmp\n");
+                        for ( i = 0 ; i < 8 ; ++i )
+                                fprintf(stderr,"%x ",*(char*)(icmp_ptr+i));
+                        fprintf(stderr,"\n");
+                        ogs_pkbuf_free(recvbuf);
+                        continue;
+		}
+
 		recvbuf_thread[i] = ogs_pkbuf_alloc(0, 200); // enough for icmp
 		memcpy(recvbuf_thread[i]->data, recvbuf->data, recvbuf->len);
 		recvbuf_thread[i]->len = recvbuf->len;
@@ -570,7 +887,7 @@ printf("[thread s1ap enb reading end]\n");
         //recvbuf2->len = recvbuf->len;
         //printf("[s1ap] RECV: %d\n",recvbuf2->len);
 	ran_ue_ngap_id = get_ran_ue_ngap_id(recvbuf);
-//printf("[ran_ue_ngap_id is: %d]\n",ran_ue_ngap_id);
+printf("[ran_ue_ngap_id is: %d]\n",ran_ue_ngap_id);
         recvbuf_thread[ran_ue_ngap_id] = ogs_pkbuf_alloc(NULL, OGS_MAX_SDU_LEN);
         memcpy(recvbuf_thread[ran_ue_ngap_id]->data, recvbuf->data, recvbuf->len);
         recvbuf_thread[ran_ue_ngap_id]->len = recvbuf->len;
@@ -588,7 +905,7 @@ void* test_runner(void* arg) {
 	int i = *(int*)arg;
     	//signal(SIGINT, hsignal);
 	//printf("test_runner: %d\n",i);
-	abts_run_test(global_suite, test1_func, &i);
+	abts_run_test(global_suite, test_icmp_func, &i);
 	return NULL;
 }
 abts_suite *test_ue_context(abts_suite *suite)
@@ -602,7 +919,7 @@ abts_suite *test_ue_context(abts_suite *suite)
     pthread_t enb_reader, gtpu_reader, ue[THREADNUM];
 
     //sock_init("127.0.0.5", "127.0.0.2");
-    sock_init("172.16.158.129", "172.16.158.129");
+    sock_init("172.16.158.129", "172.16.158.128"); // ip_5gcore, ip_emulator
     //printf("sock init done!\n");
 
     pthread_create(&enb_reader, NULL, thread_s1ap_read, NULL);

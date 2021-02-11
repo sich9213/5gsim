@@ -29,6 +29,7 @@ extern "C" {
 
 	ogs_socknode_t *test_gtpu_server_ip(int index, int family, char *hostname);
 
+
 ogs_socknode_t *test_gtpu_server(int index, int family);
 ogs_pkbuf_t *test_gtpu_read(ogs_socknode_t *node);
 void test_gtpu_close(ogs_socknode_t *node);
@@ -37,6 +38,11 @@ int test_gtpu_send(
         ogs_socknode_t *node, test_bearer_t *bearer,
         ogs_gtp_header_t *gtp_hdesc, ogs_gtp_extension_header_t *ext_hdesc,
         ogs_pkbuf_t *pkbuf);
+#include <netinet/ip_icmp.h>
+
+int test_gtpu_send_ping_2(
+	ogs_socknode_t *node, test_bearer_t *bearer, const char *dst_ip, struct icmp *icmp_info);
+
 int test_gtpu_send_ping(
         ogs_socknode_t *node, test_bearer_t *bearer, const char *dst_ip);
 int test_gtpu_send_slacc_rs(ogs_socknode_t *node, test_bearer_t *bearer);

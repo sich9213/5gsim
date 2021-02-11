@@ -73,7 +73,6 @@ ogs_socknode_t *test_gtpu_server(int index, int family)
             ogs_copyaddrinfo(&addr, test_self()->gnb2_addr);
     } else
         ogs_assert_if_reached();
-printf("addr: %s\n",addr->hostname);
     node = ogs_socknode_new(addr);
     ogs_assert(node);
 
@@ -178,6 +177,123 @@ int test_gtpu_send(
         OGS_GTP_EXTENSION_HEADER_PDU_TYPE_UL_PDU_SESSION_INFORMATION;
 
     return ogs_gtp_send_user_plane(&gnode, gtp_hdesc, ext_hdesc, pkbuf);
+}
+
+int test_gtpu_send_ping_2(
+        ogs_socknode_t *node, test_bearer_t *bearer, const char *dst_ip, struct icmp* icmp_info)
+{
+    int rv;
+    test_sess_t *sess = NULL;
+
+    ogs_gtp_header_t gtp_hdesc;
+    ogs_gtp_extension_header_t ext_hdesc;
+
+    ogs_pkbuf_t *pkbuf = NULL;
+    ogs_ipsubnet_t dst_ipsub;
+
+    ogs_assert(bearer);
+    sess = bearer->sess;
+    ogs_assert(sess);
+    ogs_assert(dst_ip);
+
+    rv = ogs_ipsubnet(&dst_ipsub, dst_ip, NULL);
+    ogs_assert(rv == OGS_OK);
+
+    pkbuf = ogs_pkbuf_alloc(
+            NULL, 200 /* enough for ICMP; use smaller buffer */);
+    ogs_assert(pkbuf);
+    ogs_pkbuf_reserve(pkbuf, OGS_GTPV1U_5GC_HEADER_LEN);
+    ogs_pkbuf_put(pkbuf, 200-OGS_GTPV1U_5GC_HEADER_LEN);
+    memset(pkbuf->data, 0, pkbuf->len);
+
+    if (dst_ipsub.family == AF_INET) {
+        struct ip *ip_h = NULL;
+        struct icmp *icmp_h = NULL;
+
+        ogs_pkbuf_trim(pkbuf, sizeof *ip_h + ICMP_MINLEN);
+
+        ip_h = (struct ip *)pkbuf->data;
+        icmp_h = (struct icmp *)((uint8_t *)ip_h + sizeof *ip_h);
+
+        ip_h->ip_v = 4;
+        ip_h->ip_hl = 5;
+        ip_h->ip_tos = 0;
+        ip_h->ip_id = rand();
+        ip_h->ip_off = 0;
+        ip_h->ip_ttl = 255;
+        ip_h->ip_p = IPPROTO_ICMP;
+        ip_h->ip_len = htobe16(sizeof *ip_h + ICMP_MINLEN);
+        ip_h->ip_src.s_addr = sess->ue_ip.addr;
+        ip_h->ip_dst.s_addr = dst_ipsub.sub[0];
+        ip_h->ip_sum = ogs_in_cksum((uint16_t *)ip_h, sizeof *ip_h);
+
+        icmp_h->icmp_type = 8;
+        icmp_h->icmp_seq = rand();
+        icmp_h->icmp_id = rand();
+        icmp_h->icmp_cksum = ogs_in_cksum((uint16_t *)icmp_h, ICMP_MINLEN);
+
+	memcpy(icmp_info, icmp_h, sizeof(struct icmp));
+
+    } else if (dst_ipsub.family == AF_INET6) {
+        struct ip6_hdr *ip6_h = NULL;
+        struct icmp6_hdr *icmp6_h = NULL;
+        uint16_t plen = 0;
+        uint8_t nxt = 0;
+        uint8_t *p = NULL;
+
+        ogs_pkbuf_trim(pkbuf, sizeof *ip6_h + sizeof *icmp6_h);
+
+        p = (uint8_t *)pkbuf->data;
+        plen =  htobe16(sizeof *icmp6_h);
+        nxt = IPPROTO_ICMPV6;
+
+        ip6_h = (struct ip6_hdr *)p;
+        icmp6_h = (struct icmp6_hdr *)((uint8_t *)ip6_h + sizeof *ip6_h);
+
+        memcpy(p, sess->ue_ip.addr6, sizeof sess->ue_ip.addr6);
+        p += sizeof sess->ue_ip.addr6;
+        memcpy(p, dst_ipsub.sub, sizeof dst_ipsub.sub);
+        p += sizeof dst_ipsub.sub;
+        p += 2; memcpy(p, &plen, 2); p += 2;
+        p += 3; *p = nxt; p += 1;
+
+        icmp6_h->icmp6_type = ICMP6_ECHO_REQUEST;
+        icmp6_h->icmp6_seq = rand();
+        icmp6_h->icmp6_id = rand();
+
+        icmp6_h->icmp6_cksum = ogs_in_cksum(
+                (uint16_t *)ip6_h, sizeof *ip6_h + sizeof *icmp6_h);
+
+        ip6_h->ip6_flow = htobe32(0x60000001);
+        ip6_h->ip6_plen = plen;
+        ip6_h->ip6_nxt = nxt;;
+        ip6_h->ip6_hlim = 0xff;
+        memcpy(ip6_h->ip6_src.s6_addr,
+                sess->ue_ip.addr6, sizeof sess->ue_ip.addr6);
+        memcpy(ip6_h->ip6_dst.s6_addr, dst_ipsub.sub, sizeof dst_ipsub.sub);
+    } else {
+        ogs_fatal("Invalid family[%d]", dst_ipsub.family);
+        ogs_assert_if_reached();
+    }
+
+    memset(&gtp_hdesc, 0, sizeof(gtp_hdesc));
+    memset(&ext_hdesc, 0, sizeof(ext_hdesc));
+
+    gtp_hdesc.type = OGS_GTPU_MSGTYPE_GPDU;
+
+    if (bearer->qfi) {
+        gtp_hdesc.teid = sess->upf_n3_teid;
+        ext_hdesc.qos_flow_identifier = bearer->qfi;
+
+    } else if (bearer->ebi) {
+        gtp_hdesc.teid = bearer->sgw_s1u_teid;
+
+    } else {
+        ogs_fatal("No QFI[%d] and EBI[%d]", bearer->qfi, bearer->ebi);
+        ogs_assert_if_reached();
+    }
+
+    return test_gtpu_send(node, bearer, &gtp_hdesc, &ext_hdesc, pkbuf);
 }
 
 int test_gtpu_send_ping(
