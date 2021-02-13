@@ -19,7 +19,7 @@
 
 #include "test-common.h"
 #define THREADNUM 1 
-#define CONCURRENT 1
+#define CONCURRENT 0
 int rv;
 ogs_socknode_t *ngap;
 ogs_socknode_t *gtpu;
@@ -27,9 +27,9 @@ ogs_socknode_t *gtpu;
 ogs_pkbuf_t *sendbuf;
 ogs_pkbuf_t *recvbuf;
 //ogs_pkbuf_t *recvbuf_gtpu; // temp use
-ogs_pkbuf_t *recvbuf_thread[3*THREADNUM]; // temp use
+ogs_pkbuf_t *recvbuf_thread[5*THREADNUM]; // temp use
 #include <netinet/ip_icmp.h>
-struct icmp *icmp_record[3*THREADNUM]; // record every icmp for each UE
+struct icmp *icmp_record[5*THREADNUM]; // record every icmp for each UE
 
 
 // thread locks
@@ -38,7 +38,7 @@ struct icmp *icmp_record[3*THREADNUM]; // record every icmp for each UE
 sem_t occupied_s1ap_read;
 sem_t occupied_gtpu_read;
 int all_terminated = 0;
-sem_t received_sem_ue[3*THREADNUM];
+sem_t received_sem_ue[5*THREADNUM];
 
 // mutex for sending
 pthread_mutex_t s1ap_send_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -65,7 +65,7 @@ struct UE_LOG {
 	clock_t UE_release_complete_time ;
 	clock_t last_update ;
 
-}ue_log[THREADNUM];
+}ue_log[5*THREADNUM];
 
 
 void sock_init(char *ip_amf, char *ip_gnb) {
@@ -133,7 +133,7 @@ static void test_icmp_func(abts_case *tc, void *data)
     bson_error_t error;
 
     int imsi = 21309 + ue_id;
-    long ran_ue_ngap_id = ue_id;
+    long ran_ue_ngap_id = 2*ue_id;
 
 
     /* Setup Test UE & Session Context */
@@ -166,7 +166,7 @@ static void test_icmp_func(abts_case *tc, void *data)
 
 
     test_ue = test_ue_add_by_suci(&mobile_identity_suci, 13);
-    test_ue->ran_ue_ngap_id = ran_ue_ngap_id;
+    test_ue->ran_ue_ngap_id = ran_ue_ngap_id-1; // due to decrease in testngap_build_initial_ue_message, need -1 here
     ogs_assert(test_ue);
 
     test_ue->nr_cgi.cell_id = 0x40001;
@@ -193,7 +193,6 @@ static void test_icmp_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, nasbuf);
 
     pthread_mutex_lock(&s1ap_send_lock);
-    test_ue->ran_ue_ngap_id --; // Due to it been increased inside below function call
     sendbuf = testngap_build_initial_ue_message(test_ue, gmmbuf, false, true);
     ABTS_PTR_NOTNULL(tc, sendbuf);
     rv = testgnb_ngap_send(ngap, sendbuf);
@@ -489,7 +488,6 @@ static void test_icmp_func(abts_case *tc, void *data)
     pthread_mutex_unlock(&s1ap_send_lock);
     printf("[SEND UE CONTEXT RELEASE DONE]: %d\n",ue_id);
 
-    sock_close();
     /* Clear Test UE Context */
     test_ue_remove(test_ue);
 }

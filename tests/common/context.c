@@ -1043,7 +1043,7 @@ test_sess_t *test_sess_find_by_psi(test_ue_t *test_ue, uint8_t psi)
 test_bearer_t *test_bearer_add(test_sess_t *sess, uint8_t ebi)
 {
     test_bearer_t *bearer = NULL;
-
+fprintf(stderr, "bearer add\n");
     ogs_assert(sess);
     ogs_assert(ebi);
 
@@ -1070,6 +1070,7 @@ test_bearer_t *test_qos_flow_add(test_sess_t *sess)
 {
     test_bearer_t *qos_flow = NULL;
 
+fprintf(stderr, "qos flow add\n");
     ogs_assert(sess);
 
     ogs_pool_alloc(&test_bearer_pool, &qos_flow);
@@ -1138,8 +1139,10 @@ test_bearer_t *test_qos_flow_find_by_qfi(test_sess_t *sess, uint8_t qfi)
 
     ogs_assert(sess);
 
-    ogs_list_for_each(&sess->bearer_list, qos_flow)
+    ogs_list_for_each(&sess->bearer_list, qos_flow) {
+		fprintf(stderr, "qfi: %d\n",qos_flow->qfi);
         if (qfi == qos_flow->qfi) return qos_flow;
+    }
 
     return NULL;
 }

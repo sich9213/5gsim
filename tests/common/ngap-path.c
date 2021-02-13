@@ -63,7 +63,7 @@ int testngap_get_ran_ue_ngap_id(test_ue_t *test_ue, ogs_pkbuf_t *pkbuf) {
 	    res = test_ue->ran_ue_ngap_id;
             break;
         case NGAP_ProcedureCode_id_PDUSessionResourceSetup:
-		printf("[CASE 4] special handle\n");
+		//printf("[CASE 4] special handle\n");
 		// return the psi
 		res = testngap_get_psi_pdu_session_resource_setup_request(test_ue, pdu);
             break;
@@ -141,12 +141,13 @@ void testngap_recv(test_ue_t *test_ue, ogs_pkbuf_t *pkbuf)
     pdu = &message;
     ogs_assert(pdu);
 printf("[RECV TEST BEGIN]\n");
-/*
+if ( rv != OGS_OK ) {
+
         printf("SEQ:\n");
         for ( i = 0 ; i < pkbuf->len ; ++i )
                 printf("%x ",pkbuf->data[i]);
         printf("\n");
-*/
+}
     switch (pdu->present) {
     case NGAP_NGAP_PDU_PR_initiatingMessage:
 	    //printf("{BRANCH} init msg\n");
