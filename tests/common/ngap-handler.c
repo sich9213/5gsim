@@ -406,6 +406,8 @@ int testngap_get_psi_pdu_session_resource_setup_request(
             i++) {
         ie = PDUSessionResourceSetupRequest->protocolIEs.list.array[i];
         switch (ie->id) {
+	case NGAP_ProtocolIE_ID_id_RAN_UE_NGAP_ID:
+            return ie->value.choice.RAN_UE_NGAP_ID;
         case NGAP_ProtocolIE_ID_id_PDUSessionResourceSetupListSUReq:
             PDUSessionList = &ie->value.choice.PDUSessionResourceSetupListSUReq;
             ogs_assert(PDUSessionList);
@@ -416,9 +418,6 @@ int testngap_get_psi_pdu_session_resource_setup_request(
                 //sess = test_sess_find_by_psi(
                 //            test_ue, PDUSessionItem->pDUSessionID);
 		//ogs_assert(sess);
-
-		res = PDUSessionItem->pDUSessionID;
-		return res;
 
                 if (PDUSessionItem->pDUSessionNAS_PDU)
                     testngap_send_to_nas(

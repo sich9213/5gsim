@@ -64,7 +64,7 @@ int testngap_get_ran_ue_ngap_id(test_ue_t *test_ue, ogs_pkbuf_t *pkbuf) {
             break;
         case NGAP_ProcedureCode_id_PDUSessionResourceSetup:
 		//printf("[CASE 4] special handle\n");
-		// return the psi
+		// return the ue_ran_ngap_id
 		res = testngap_get_psi_pdu_session_resource_setup_request(test_ue, pdu);
             break;
         case NGAP_ProcedureCode_id_PDUSessionResourceRelease:

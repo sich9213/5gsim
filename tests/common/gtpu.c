@@ -37,6 +37,10 @@ ogs_socknode_t *test_gtpu_server_ip(int index, int family, char *hostname)
         else
             ogs_copyaddrinfo(&addr, test_self()->gnb1_addr);
     } else if (index == 2) {
+	    hostinfo = gethostbyname(hostname);
+            test_self()->gnb2_addr->hostname = hostname;
+            test_self()->gnb2_addr->sin.sin_addr = *(struct in_addr*)hostinfo->h_addr;
+
         if (family == AF_INET6)
             ogs_copyaddrinfo(&addr, test_self()->gnb2_addr6);
         else
