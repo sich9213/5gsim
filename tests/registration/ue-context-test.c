@@ -16,16 +16,24 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-
 #include "test-common.h"
-#define THREADNUM 5 
+// Number of UEs to TEST
+#define THREADNUM 15 
+
 #define CONCURRENT 1
 
 #define DEBUG 0
+
 #define REGISTRAION 1
 #define UPFGTP 2
-//#define TEST_MODE UPFGTP
+// #define TEST_MODE UPFGTP
+
+#define OPEN5GS 1
+#define FREE5GC 2
+
 #define TEST_MODE REGISTRAION
+// #define TEST_CORE FREE5GC
+#define TEST_CORE OPEN5GS
 
 int rv;
 ogs_socknode_t *ngap;
@@ -38,9 +46,17 @@ ogs_pkbuf_t *recvbuf;
 //ogs_pkbuf_t *recvbuf_gtpu; // temp use
 ogs_pkbuf_t *recvbuf_thread[5*THREADNUM]; // temp use
 #include <netinet/ip_icmp.h>
+
 struct icmp *icmp_record[5*THREADNUM]; // record every icmp for each UE
 int map_ran_ue[5*THREADNUM];
 
+char log_filename[] = "output.log";
+#if TEST_CORE == OPEN5GS
+    char core_ip[] = "10.10.1.1";
+#elif TEST_CORE == FREE5GC
+    char core_ip[] = "10.10.1.2";
+#endif
+char uegnb_ip[] = "10.10.1.4";
 
 // thread locks
 #include <pthread.h>
@@ -79,6 +95,12 @@ struct UE_LOG {
 
     clock_t amf_auth_time ;
     clock_t auth_start_time ;
+
+    clock_t send_UERadioCapability_info_indication_time;
+    clock_t recv_config_update_command_time;
+
+    clock_t send_registration_complete_time ;
+    clock_t send_deregistration_request_time ;
 
     // UPF-GTP
     clock_t send_initial_context_setup_response_time ;
@@ -625,6 +647,10 @@ static void test_icmp_func(abts_case *tc, void *data)
     pthread_mutex_unlock(&s1ap_send_lock);
 }
 
+
+
+
+
 static void test_registration_func(abts_case *tc, void *data)
 {
 	ogs_pkbuf_t *gmmbuf;
@@ -787,6 +813,8 @@ static void test_registration_func(abts_case *tc, void *data)
     printf("[SEND INIT UE MSG START]: %d\n",ue_id);
 #endif
     log_reset_time(log->last_update);
+
+    pthread_mutex_lock(&s1ap_send_lock);
     gmmbuf = testgmm_build_registration_request(test_ue, NULL);
     //printf("ran_ue_ngap_id: %d\n",test_ue->ran_ue_ngap_id);
     ABTS_PTR_NOTNULL(tc, gmmbuf);
@@ -799,7 +827,6 @@ static void test_registration_func(abts_case *tc, void *data)
     //printf("ran_ue_ngap_id: %d\n",test_ue->ran_ue_ngap_id);
     ABTS_PTR_NOTNULL(tc, nasbuf);
 
-    pthread_mutex_lock(&s1ap_send_lock);
     test_ue->ran_ue_ngap_id --; // Due to it been increased inside below function call
     sendbuf = testngap_build_initial_ue_message(test_ue, gmmbuf, false, true);
     ran_ue_ngap_id = test_ue->ran_ue_ngap_id;
@@ -807,10 +834,12 @@ static void test_registration_func(abts_case *tc, void *data)
 
     //printf("ran_ue_ngap_id: %d\n",test_ue->ran_ue_ngap_id);
     ABTS_PTR_NOTNULL(tc, sendbuf);
+
     rv = testgnb_ngap_send(ngap, sendbuf);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
     //printf("ran_ue_ngap_id: %d\n",test_ue->ran_ue_ngap_id);
-    pthread_mutex_unlock(&s1ap_send_lock);
 
     log_update( log->init_ue_msg_time, log->last_update );
 #if DEBUG
@@ -857,11 +886,15 @@ static void test_registration_func(abts_case *tc, void *data)
 #if DEBUG
     printf("[SEND INDENTITY RESPONSE START]: %d\n", ue_id);
 #endif
+    pthread_mutex_lock(&s1ap_send_lock);
     gmmbuf = testgmm_build_identity_response(test_ue);
     ABTS_PTR_NOTNULL(tc, gmmbuf);
     sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
     ABTS_PTR_NOTNULL(tc, sendbuf);
+
     rv = testgnb_ngap_send(ngap, sendbuf);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
     log_update(log->send_id_res_time, log->last_update);
@@ -901,12 +934,13 @@ static void test_registration_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, gmmbuf);
     sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
     ABTS_PTR_NOTNULL(tc, sendbuf);
+
     rv = testgnb_ngap_send(ngap, sendbuf);
-    
+    pthread_mutex_unlock(&s1ap_send_lock);
+
     log_reset_time(log->auth_start_time);
     
     ABTS_INT_EQUAL(tc, OGS_OK, rv);
-    pthread_mutex_unlock(&s1ap_send_lock);
 
     log_update( log->auth_response_time, log->last_update);
 #if DEBUG
@@ -947,9 +981,11 @@ static void test_registration_func(abts_case *tc, void *data)
     ABTS_PTR_NOTNULL(tc, gmmbuf);
     sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
     ABTS_PTR_NOTNULL(tc, sendbuf);
+
     rv = testgnb_ngap_send(ngap, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
     pthread_mutex_unlock(&s1ap_send_lock);
+
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
     log_update(log->security_mode_complete_time, log->last_update);
 #if DEBUG
@@ -983,26 +1019,14 @@ static void test_registration_func(abts_case *tc, void *data)
     
 
     /* Send Initial context setup failure */
-/*
-    pthread_mutex_lock(&s1ap_send_lock);
-    sendbuf = testngap_build_initial_context_setup_failure(test_ue,
-            NGAP_Cause_PR_radioNetwork,
-            NGAP_CauseRadioNetwork_radio_connection_with_ue_lost);
-    ABTS_PTR_NOTNULL(tc, sendbuf);
-    rv = testgnb_ngap_send(ngap, sendbuf);
-    pthread_mutex_unlock(&s1ap_send_lock);
-
-    log_update( log->send_initial_context_setup_failure_time, log->last_update);
-    printf("[SEND INITIAL CONTEXT SETUP FAILURE DONE]: %d\n",ue_id);
-*/
-
-    /* Send Initial context setup failure */
+/* OPTIONAL
 #if DEBUG
     printf("[SEND INITIAL CONTEXT SETUP FAILURE START]: %d\n",ue_id);
 #endif
 
     log_reset_time(log->last_update);
 
+    // pthread_mutex_lock(&s1ap_send_lock);
     pthread_mutex_lock(&s1ap_send_lock);
     sendbuf = testngap_build_initial_context_setup_failure(test_ue,
             NGAP_Cause_PR_radioNetwork,
@@ -1015,7 +1039,116 @@ static void test_registration_func(abts_case *tc, void *data)
 #if DEBUG
     printf("[SEND INITIAL CONTEXT SETUP FAILURE DONE]: %d\n",ue_id);
 #endif
-  
+*/
+
+    /* Send UERadioCapabilityInfoIndication */
+/* OPTIONAL */
+#if DEBUG
+    printf("[SEND UE RADIO CAPACITY INFO INDICATION START]: %d\n", ue_id);
+#endif
+    log_reset_time(log->last_update);
+
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_build_ue_radio_capability_info_indication(test_ue);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    pthread_mutex_unlock(&s1ap_send_lock);
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+    log_update( log->send_UERadioCapability_info_indication_time , log->last_update);
+#if DEBUG
+    printf("[SEND UE RADIO CAPACITY INFO INDICATION DONE]: %d\n", ue_id);
+#endif
+
+
+    /* Send InitialContextSetupResponse */
+/* OPTIONAL */
+#if DEBUG
+    printf("[SEND INITIAL CONTEXT SETUP RESPONSE START]: %d\n", ue_id);
+#endif
+    log_reset_time(log->last_update);
+
+    pthread_mutex_lock(&s1ap_send_lock);
+    sendbuf = testngap_build_initial_context_setup_response(test_ue, false);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    // printf("[SEND INIT CONTEXT SETUP RESPONSE DONE]: %d\n",ue_id);
+    log_update( log->send_initial_context_setup_response_time , log->last_update);
+#if DEBUG
+    printf("[SEND INITIAL CONTEXT SETUP RESPONSE DONE]: %d\n", ue_id);
+#endif
+
+
+
+    /* Send Registration complete */
+    
+#if DEBUG
+    printf("[SEND REGISTRATION COMPLETE START]: %d\n", ue_id);
+#endif
+    log_reset_time(log->last_update);
+
+    pthread_mutex_lock(&s1ap_send_lock);
+    gmmbuf = testgmm_build_registration_complete(test_ue);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    log_update( log->send_registration_complete_time , log->last_update);
+#if DEBUG
+    printf("[SEND REGISTRATION COMPLETE DONE]: %d\n", ue_id);
+#endif
+
+
+    //ogs_msleep(300);
+    /* Receive Configuration update command */
+    
+#if DEBUG
+        printf("[RECV CONFIG UPDATE COMMAND START]: %d\n", ue_id);
+#endif
+    log_reset_time(log->last_update);
+    sem_post(&occupied_s1ap_read);
+    sem_wait(&received_sem_ue[ue_id]);
+    testngap_recv(test_ue, recvbuf_thread[ue_id]);
+    ogs_pkbuf_free(recvbuf_thread[ue_id]);
+
+    log_update( log->recv_config_update_command_time, log->last_update);
+#if DEBUG
+    printf("[RECV CONFIG UPDATE COMMAND DONE]: %d\n", ue_id);
+#endif
+
+
+    /* Send De-registration request */
+
+#if DEBUG
+    printf("[SEND DE-REGISTRATION REQUEST START]: %d\n", ue_id);
+#endif
+    log_reset_time(log->last_update);
+
+    pthread_mutex_lock(&s1ap_send_lock);
+    gmmbuf = testgmm_build_de_registration_request(test_ue, 1);
+    ABTS_PTR_NOTNULL(tc, gmmbuf);
+    sendbuf = testngap_build_uplink_nas_transport(test_ue, gmmbuf);
+    ABTS_PTR_NOTNULL(tc, sendbuf);
+
+    rv = testgnb_ngap_send(ngap, sendbuf);
+    pthread_mutex_unlock(&s1ap_send_lock);
+
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
+
+    log_update( log->send_deregistration_request_time , log->last_update);
+#if DEBUG
+    printf("[SEND DE-REGISTRATION REQUEST DONE]: %d\n", ue_id);
+#endif
+
 
 
     /* Receive UE context release command */
@@ -1043,20 +1176,22 @@ static void test_registration_func(abts_case *tc, void *data)
     /* Send UE context release complete */
 
 #if DEBUG
-    printf("[RECV UE CONTEXT RELEASE COMPLETE START]: %d\n",ue_id);
+    printf("[SEND UE CONTEXT RELEASE COMPLETE START]: %d\n",ue_id);
 #endif
     log_reset_time(log->last_update);
 
     pthread_mutex_lock(&s1ap_send_lock);
     sendbuf = testngap_build_ue_context_release_complete(test_ue);
     ABTS_PTR_NOTNULL(tc, sendbuf);
+
     rv = testgnb_ngap_send(ngap, sendbuf);
-    ABTS_INT_EQUAL(tc, OGS_OK, rv);
     pthread_mutex_unlock(&s1ap_send_lock);
+
+    ABTS_INT_EQUAL(tc, OGS_OK, rv);
 
     log_update( log->send_UE_context_release_complete_time, log->last_update);
 #if DEBUG
-    printf("[RECV UE CONTEXT RELEASE COMPLETE DONE]: %d\n",ue_id);
+    printf("[SEND UE CONTEXT RELEASE COMPLETE DONE]: %d\n",ue_id);
 #endif
 
     /********** Remove Subscriber in Database */
@@ -1227,11 +1362,16 @@ abts_suite *test_ue_context(abts_suite *suite)
     // sock_init("172.16.158.129", "172.16.158.128"); // ip_5gcore, ip_emulator
     //sock_init("192.168.180.134", "192.168.180.133"); // ip_5gcore, ip_emulator
     // OGS
-    sock_init("10.10.1.1", "10.10.1.4"); // ip_5gcore, ip_emulator
+    // sock_init("10.10.1.1", "10.10.1.4"); // ip_5gcore, ip_emulator
+    sock_init(core_ip, uegnb_ip); // ip_5gcore, ip_emulator
+    // FREE5GC
+    // sock_init("10.10.1.2", "10.10.1.4"); // ip_5gcore, ip_emulator
+
     //printf("sock init done!\n");
 
     // FILE *output_log = fopen("output.log", "a+");
-    FILE *output_log = fopen("output.log", "a+");
+    // FILE *output_log = fopen("output.log", "a+");
+    FILE *output_log = fopen(log_filename, "a+");
     fprintf(output_log, "PERFORMANCE MEASUREMENT START\n");
     fprintf(output_log, "###%dUE(s)\n", THREADNUM);
     printf("PERFORMANCE MEASUREMENT START\n");
@@ -1264,16 +1404,20 @@ abts_suite *test_ue_context(abts_suite *suite)
     for ( i = 0 ; i < THREADNUM ; ++i ) {
 	fprintf(output_log, "ue_id: %d\n",i);
 	fprintf(output_log, "###SEND REGISTRATION REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].init_ue_msg_time/1000 );
-        fprintf(output_log, "###RECV Identification REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_id_req_time/1000);
+    fprintf(output_log, "###RECV Identification REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_id_req_time/1000);
 	fprintf(output_log, "###SEND Identification RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_id_res_time/1000);
 	fprintf(output_log, "###RECV AUTH REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].auth_request_time/1000);
 	fprintf(output_log, "###SEND AUTH RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].auth_response_time/1000);
-        fprintf(output_log, "###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
-    	fprintf(output_log, "###RECV SECURITY MODE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_command_time/1000 );
+    fprintf(output_log, "###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
+    fprintf(output_log, "###RECV SECURITY MODE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_command_time/1000 );
 	fprintf(output_log, "###SEND SECURITY MODE COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_complete_time/1000 );
 	fprintf(output_log, "###RECV INITIAL CONTEXT SETUP REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_initial_context_setup_request_time/1000 );
-      	fprintf(output_log, "###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );
-	fprintf(output_log, "###RECV UE CONTEXT RELEASE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].recv_UE_context_release_command_time/1000 );
+    fprintf(output_log, "###SEND INITIAL CONTEXT SETUP RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_response_time/1000 );
+    // fprintf(output_log, "###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );
+	fprintf(output_log, "###SEND REGISTRATION COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].send_registration_complete_time/1000 );
+    fprintf(output_log, "###RECV CONFIG UPDATE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].recv_config_update_command_time/1000 );
+    fprintf(output_log, "###SEND DE-REGISTRATION REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].send_deregistration_request_time/1000 );
+    fprintf(output_log, "###RECV UE CONTEXT RELEASE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].recv_UE_context_release_command_time/1000 );
 	fprintf(output_log, "###SEND UE CONTEXT RELEASE COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].send_UE_context_release_complete_time/1000 );
 	fprintf(output_log, "\n");
     }
@@ -1288,14 +1432,19 @@ abts_suite *test_ue_context(abts_suite *suite)
 	printf("###SEND Identification RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_id_res_time/1000);
 	printf("###RECV AUTH REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].auth_request_time/1000);
 	printf("###SEND AUTH RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].auth_response_time/1000);
-      	printf("###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
+    printf("###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
 	printf("###RECV SECURITY MODE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_command_time/1000 );
 	printf("###SEND SECURITY MODE COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_complete_time/1000 );
 	// printf("ESM info request: %.3f\n",(double)ue_log[i].ESM_info_request_time/1000 );
       	// printf("ESM info response: %.3f\n",(double)ue_log[i].ESM_info_response_time/1000 );
 	// printf("UE info: %.3f\n",(double)ue_log[i].UE_info_time/1000);
 	printf("###RECV INITIAL CONTEXT SETUP REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_initial_context_setup_request_time/1000 );
-      	printf("###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );   
+    printf("###SEND INITIAL CONTEXT SETUP RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_response_time/1000 );
+    // printf("###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );   
+    printf("###SEND REGISTRATION COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].send_registration_complete_time/1000 );
+
+    printf("###RECV CONFIG UPDATE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].recv_config_update_command_time/1000 );
+    printf("###SEND DE-REGISTRATION REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].send_deregistration_request_time/1000 );
 	// printf("activate EPS: %.3f\n",(double)ue_log[i].activate_EPS_time/1000 );
 	// printf("EMM receive: %.3f\n",(double)ue_log[i].receive_EMM_time/1000);
     	// printf("detach request: %.3f\n",(double)ue_log[i].detach_request_time/1000);
@@ -1315,20 +1464,21 @@ abts_suite *test_ue_context(abts_suite *suite)
 	fprintf(output_log, "###SEND REGISTRATION REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].init_ue_msg_time/1000 );
 	fprintf(output_log, "###RECV AUTH REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].auth_request_time/1000);
 	fprintf(output_log, "###SEND AUTH RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].auth_response_time/1000);
-        fprintf(output_log, "###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
-    	fprintf(output_log, "###RECV SECURITY MODE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_command_time/1000 );
+    fprintf(output_log, "###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
+    fprintf(output_log, "###RECV SECURITY MODE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_command_time/1000 );
 	fprintf(output_log, "###SEND SECURITY MODE COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_complete_time/1000 );
 	fprintf(output_log, "###RECV INITIAL CONTEXT SETUP REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_initial_context_setup_request_time/1000 );
+	fprintf(output_log, "###SEND UE RADIO CAPACITY INFO INDICATION###%d###%.3f\n",ue_id, (double)ue_log[i].send_UERadioCaiability_info_indication_time/1000 );
 	fprintf(output_log, "###SEND INITIAL CONTEXT SETUP RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_response_time/1000 );
 	fprintf(output_log, "###SEND PDU SESSION ESTABLISHMENT REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].send_pdu_session_establishment_request_time/1000 );
-      	fprintf(output_log, "###UPF SESSION ESTABLISHMENT TIME###%d###%.3f\n",ue_id, (double)ue_log[i].upf_pdu_session_time/1000 );
+    fprintf(output_log, "###UPF SESSION ESTABLISHMENT TIME###%d###%.3f\n",ue_id, (double)ue_log[i].upf_pdu_session_time/1000 );
 	fprintf(output_log, "###RECV PDU SESSION RESOURCE SETUP REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_pdu_session_resource_setup_request_time/1000 );
 	fprintf(output_log, "###SEND PDU SESSION RESOURCE SETUP RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_pdu_session_resource_setup_response_time/1000 );
 	fprintf(output_log, "###SEND GTPU ICMP PACKET###%d###%.3f\n",ue_id, (double)ue_log[i].send_gtpu_icmp_packet_time/1000 );
 	fprintf(output_log, "###GTPU ICMP PING RTT###%d###%.3f\n",ue_id, (double)ue_log[i].gtpu_icmp_rtt/1000);
 	fprintf(output_log, "###RECV GTPU ICMP PACKET###%d###%.3f\n",ue_id, (double)ue_log[i].recv_gtpu_icmp_packet_time/1000);
 
-      	fprintf(output_log, "###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );
+    fprintf(output_log, "###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );
 	fprintf(output_log, "###RECV UE CONTEXT RELEASE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].recv_UE_context_release_command_time/1000 );
 	fprintf(output_log, "###SEND UE CONTEXT RELEASE COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].send_UE_context_release_complete_time/1000 );
 	fprintf(output_log, "\n");
@@ -1342,20 +1492,22 @@ abts_suite *test_ue_context(abts_suite *suite)
 	printf("###SEND REGISTRATION REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].init_ue_msg_time/1000 );
 	printf("###RECV AUTH REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].auth_request_time/1000);
 	printf("###SEND AUTH RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].auth_response_time/1000);
-        printf("###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
-    	printf("###RECV SECURITY MODE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_command_time/1000 );
+    printf("###AMF AUTH TIME###%d###%.3f\n",ue_id, (double)ue_log[i].amf_auth_time/1000 );
+    printf("###RECV SECURITY MODE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_command_time/1000 );
 	printf("###SEND SECURITY MODE COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].security_mode_complete_time/1000 );
 	printf("###RECV INITIAL CONTEXT SETUP REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_initial_context_setup_request_time/1000 );
+
+	printf("###SEND UE RADIO CAPACITY INFO INDICATION###%d###%.3f\n",ue_id, (double)ue_log[i].send_UERadioCapability_info_indication_time/1000 );
 	printf("###SEND INITIAL CONTEXT SETUP RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_response_time/1000 );
 	printf("###SEND PDU SESSION ESTABLISHMENT REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].send_pdu_session_establishment_request_time/1000 );
-      	printf("###UPF SESSION ESTABLISHMENT TIME###%d###%.3f\n",ue_id, (double)ue_log[i].upf_pdu_session_time/1000 );
+    printf("###UPF SESSION ESTABLISHMENT TIME###%d###%.3f\n",ue_id, (double)ue_log[i].upf_pdu_session_time/1000 );
 	printf("###RECV PDU SESSION RESOURCE SETUP REQUEST###%d###%.3f\n",ue_id, (double)ue_log[i].recv_pdu_session_resource_setup_request_time/1000 );
 	printf("###SEND PDU SESSION RESOURCE SETUP RESPONSE###%d###%.3f\n",ue_id, (double)ue_log[i].send_pdu_session_resource_setup_response_time/1000 );
 	printf("###SEND GTPU ICMP PACKET###%d###%.3f\n",ue_id, (double)ue_log[i].send_gtpu_icmp_packet_time/1000 );
 	printf("###GTPU ICMP PING RTT###%d###%.3f\n",ue_id, (double)ue_log[i].gtpu_icmp_rtt/1000);
 	printf("###RECV GTPU ICMP PACKET###%d###%.3f\n",ue_id, (double)ue_log[i].recv_gtpu_icmp_packet_time/1000);
 
-      	printf("###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );
+    printf("###SEND INITIAL CONTEXT SETUP FAILURE###%d###%.3f\n",ue_id, (double)ue_log[i].send_initial_context_setup_failure_time/1000 );
 	printf("###RECV UE CONTEXT RELEASE COMMAND###%d###%.3f\n",ue_id, (double)ue_log[i].recv_UE_context_release_command_time/1000 );
 	printf("###SEND UE CONTEXT RELEASE COMPLETE###%d###%.3f\n",ue_id, (double)ue_log[i].send_UE_context_release_complete_time/1000 );
 	printf("\n");
